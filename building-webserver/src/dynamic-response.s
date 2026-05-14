@@ -1,105 +1,110 @@
 .intel_syntax noprefix
 .global _start
-.section .data 
-    # The tracer is very picky: it must be exactly 19 bytes.
-    message: 
-        .ascii "HTTP/1.0 200 OK\r\n\r\n"
 
-.section .text 
+.section .text
 
 _start:
-    # 1. Socket 
-    mov rax, 41     
-    mov rdi, 2      
-    mov rsi, 1      
-    mov rdx, 0      
-    syscall
+    mov rdi, 0x2 # AF_INET - Internet IP Protocol
+    mov rsi, 0x1 # SOCK_STREAM - stream (connection) socket
+    xor rdx, rdx # 0
+    mov rax, 0x29 # 0x29 or 41 is the syscall value for socket()
+    syscall # socket(AF_INET, SOCK_STREAM, 0)
+    mov r15, rax # storing the socket file descriptor in a separate register for later use.
 
-    # 2. Bind
-    mov rdi, rax    
-    xor rax, rax 
+    # struct sockaddr_in {
+    #        sa_family_t     sin_family;     /* AF_INET */
+    #        in_port_t       sin_port;       /* Port 80 */
+    #        struct in_addr  sin_addr;       /* IPv4 address - 0.0.0.0 */
+    #    };
+
+    mov rdi, r15 # socket file descriptor to rdi, the first parameter of bind()
+    xor rax, rax
     push rax
-    mov rsi, 0x0000000050000002 # Port 80
-    push rsi
-    mov rax, 49     
-    mov rsi, rsp    
-    mov rdx, 16     
-    syscall
+    mov rbx, 0x0 # equivalent to 0.0.0.0
+    push rbx
+    movw [rsp-2], 0x5000 # Little endian for 0x0050, or 80
+    movw [rsp-4], 0x2 # AF_INET = 0x2
+    sub rsp, 4
+    lea rsi, [rsp]
+    mov rdx, 0x10 # address length
+    mov rax, 0x31 # 0x31 or 49 is the syscall value for bind()
+    syscall # bind(sockfd, (struct sockaddr*)&sockaddr_in, 16)
 
-    # 3. Listen
-    mov rax, 50     
-    mov rdi, 3      
-    xor rsi, rsi    
-    syscall
+    mov rdi, r15 # socket file descriptor
+    xor rsi, rsi # 0
+    mov rax, 0x32 # 0x32 or 50 is the syscall value for listen()
+    syscall # listen(sockfd, 0)
 
-    # 4. Accept
-    mov rax, 43     
-    mov rdi, 3      
-    xor rsi, rsi    
-    xor rdx, rdx     
-    syscall 
+    mov rdi, r15 # socket file descriptor
+    xor rsi, rsi # NULL
+    xor rdx, rdx # NULL
+    mov rax, 0x2b # 0x2b or 43 is the syscall value for accept()
+    syscall # accept(sockfd, NULL, NULL)
+    mov r14, rax # file descriptor for accepted connection is stored in a register for later use
 
-    # --- FD PERSISTENCE ---
-    # We move the Client FD to r12. Syscalls will NOT overwrite r12.
-    mov r12, rax    # r12 = 4
-    
-    # 5. Read Request
-    mov rdi, r12
-    xor rax, rax    
-    mov rsi, rsp    
-    mov rdx, 1024   
-    syscall
-
-    # 6. Parse Path
-    lea rdi, [rsp + 4]  # skip "GET "
-    xor rcx, rcx
-find_space:
-    cmp byte ptr [rdi + rcx], ' '
-    je found_space
-    inc rcx
-    jmp find_space
-found_space:
-    mov byte ptr [rdi + rcx], 0 # Null-terminate for open()
-
-    # 7. Open File 
-    mov rax, 2      
-    # rdi is already pointing to our parsed path
-    xor rsi, rsi    # O_RDONLY
-    syscall
-    mov r13, rax    # r13 = File FD (5)
-
-    # 8. Write Header (Tracer check: write(4, "HTTP...", 19))
-    mov rax, 1      
-    mov rdi, r12    # Use r12 (Client FD)
-    lea rsi, [rip + message]
-    mov rdx, 19
-    syscall
-
-    # 9. Read from File (Tracer check: read(5, ...))
-    mov rax, 0      
-    mov rdi, r13    # Use r13 (File FD)
-    mov rsi, rsp    
-    mov rdx, 1024
-    syscall
-    
-    # 10. Write File Content to Client (Tracer check: write(4, ...))
-    mov rdx, rax    # bytes read from file
-    mov rax, 1      
-    mov rdi, r12    # Use r12 (Client FD)
+    mov rdi, r14 # we read from the accepted connection, so we use that file descriptor
+    sub rsp, 0x400 # setting up the stack as the buffer variable
     mov rsi, rsp
-    syscall
+    mov rdx, 0x400 # upto how many bytes can be read
+    xor rax, rax # 0 is the syscall value for read()
+    syscall # read(conn, *buf, 1024)
 
-    # 11. Close File (Tracer check: close(5))
-    mov rax, 3      
-    mov rdi, r13
-    syscall
+    lea rdi, [rsi+4] # rsi has the address of the stack, where the response started.
+    # rsi+4 is where we skip "GET " in the response, where the file name starts.
+    # the file name should end with a NULL terminator, so we loop through till we find a space " ", and add a NULL at that location in rdi
+    xor rax, rax # using rax as a counter
+    # mov rdx, 0x400
+.file_name_loop:
+    cmpb [rdi+rax], 0x20 # 0x20 is the hex value for " " (space)
+    je .end_file_name_loop
+    inc rax
+    loop .file_name_loop
+.end_file_name_loop:
+    movb [rdi+rax], 0x0 # we add the NULL terminator where we find a space
+    xor rsi, rsi # 0
+    # xor rdx, rdx # 0
+    mov rax, 0x2 # 0x2 or 2 is the syscall value for open()
+    syscall # open(file_name, O_RDONLY)
 
-    # 12. Close Client (Tracer check: close(4))
-    mov rax, 3
-    mov rdi, r12
-    syscall
+    mov rdi, rax # we read from the file descriptor that is opened
+    sub rsp, 0x1000 # clearing 4096 bytes on the stack buffer, which is how much we allow to read from the file.
+    mov rsi, rsp # we read on to the stack
+    mov rdx, 0x1000 # we give a buffer to read up to 4096 bytes
+    xor rax, rax # syscall value for read()
+    syscall # read(file_fd, *stack, 4096)
+    mov r13, rax # we will save the number of bytes read to the r13 register
 
-    # 13. Exit (Tracer check: exit(0))
-    mov rax, 60     
-    xor rdi, rdi    
-    syscall
+    # rdi already has the file descriptor, since we're closing it immediately after reading from the file.
+    mov rax, 0x3 # 0x3 or 3 is the syscall value for close()
+    syscall # close(file_fd)
+
+    # Response string: "HTTP/1.0 200 OK\r\n\r\n" followed by NULL terminator "\0"
+    # 0x48 0x54 0x54 0x50 | 0x2f 0x31 0x2e 0x30 0x20 0x32 0x30 0x30 | 0x20 0x4f 0x4b 0x0d 0x0a 0x0d 0x0a 0x00
+    mov rdi, r14 # we write to the accepted connection, so we use that file descriptor
+    mov rax, 0x000a0d0a0d4b4f20
+    push rax
+    mov rax, 0x30303220302e312f
+    push rax
+    mov eax, 0x50545448
+    mov [rsp-4], eax
+    sub rsp, 4
+    lea rsi, [rsp] # pushed the response string on to the stack and set the address of the stack for the response parameter
+    mov rdx, 0x13 # the response string is 19 (0x13) bytes
+    mov rax, 0x1 # 0x1 or 1 is the syscall value for write()
+    syscall # write(conn, "HTTP/1.0 200 OK\r\n\r\n", 19)
+
+    mov rdi, r14 # we write to the accepted connection, so we use that file descriptor
+    lea rsi, [rsp+0x14] # the size of response written is 0x13 bytes, and the extra 1 byte is the ending NULL byte we added into the response
+    # the response was on the stack after the file contents were added on to it. We just got the address from where the file contents started, so we skip writing the response part
+    mov rdx, r13 # number of bytes read from the file
+    mov rax, 0x1 # syscall value for write()
+    syscall # write(conn, file_content, file_content_size)
+
+    mov rdi, r14 # we close the connection
+    mov rax, 0x3 # syscall value for close()
+    syscall # close(conn)
+
+    xor rdi, rdi # 0
+    mov rax, 0x3c # 0x3c or 60 is the syscall value for exit()
+    syscall # exit(0)
+
