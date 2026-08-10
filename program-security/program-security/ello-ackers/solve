@@ -1,0 +1,3 @@
+as -o shellcode.o shellcode.s
+objcopy -O binary --only-section=.text shellcode.o shellcode.bin
+xxd -g 1 shellcode.bin | grep -i ' 48 '
