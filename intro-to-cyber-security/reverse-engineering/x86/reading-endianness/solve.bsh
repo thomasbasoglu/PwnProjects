@@ -1,0 +1,1 @@
+python3 -c 'import sys; sys.stdout.buffer.write((0x724e4f5b).to_bytes(4, "little"))' > solve.cimg
