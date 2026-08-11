@@ -1,0 +1,1 @@
+python3 -c 'open("solve.cimg", "wb").write(b"[lMg" + (225).to_bytes(2, "little"))'
