@@ -1,0 +1,1 @@
+python3 -c 'open("solve.cimg","wb").write(b"CONR" + (0x5f).to_bytes(4,"little"))'
